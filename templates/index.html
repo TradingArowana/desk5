@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Desk5 Trading Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --panel: #111827;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #6b7280;
+    --accent: #10b981;
+    --danger: #ef4444;
+    --warn: #f59e0b;
+    --info: #3b82f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', Roboto, monospace;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px;
+  }
+  h1 { font-size: 1.5rem; color: var(--accent); }
+  .status-badge {
+    padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600;
+    background: var(--border); color: var(--muted);
+  }
+  .status-badge.live { background: rgba(16,185,129,0.15); color: var(--accent); }
+  .status-badge.halted { background: rgba(239,68,68,0.15); color: var(--danger); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 15px;
+  }
+  .panel h2 { font-size: 0.9rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .metric { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+  .metric:last-child { border-bottom: none; }
+  .metric .val { font-family: monospace; font-weight: 600; }
+  .metric .pos { color: var(--accent); }
+  .metric .neg { color: var(--danger); }
+  .metric .warn { color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .coin { font-weight: 600; }
+  .long { color: var(--accent); }
+  .short { color: var(--danger); }
+  .timestamp { color: var(--muted); font-size: 0.75rem; }
+  .btn {
+    background: var(--info); color: white; border: none; padding: 8px 16px;
+    border-radius: 4px; cursor: pointer; font-size: 0.85rem; margin-right: 8px;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn.danger { background: var(--danger); }
+  .footer {
+    margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);
+    font-size: 0.75rem; color: var(--muted); display: flex; justify-content: space-between;
+  }
+  .alerts { max-height: 200px; overflow-y: auto; }
+  .alert-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+  .alert-item:last-child { border-bottom: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Desk5 Trading Desk</h1>
+      <div class="timestamp" id="lastUpdate">Last update: --</div>
+    </div>
+    <span class="status-badge" id="statusBadge">Loading...</span>
+  </header>
+
+  <div class="grid">
+    <!-- Capital -->
+    <div class="panel">
+      <h2>Capital</h2>
+      <div class="metric"><span>Bankroll</span><span class="val" id="bankroll">--</span></div>
+      <div class="metric"><span>Peak</span><span class="val" id="peakBankroll">--</span></div>
+      <div class="metric"><span>Drawdown</span><span class="val" id="drawdown">--</span></div>
+      <div class="metric"><span>Unrealized PnL</span><span class="val" id="unrealized">--</span></div>
+      <div class="metric"><span>Realized PnL</span><span class="val" id="realized">--</span></div>
+      <div class="metric"><span>Daily Loss</span><span class="val" id="dailyLoss">--</span></div>
+      <div class="metric"><span>Daily Wins</span><span class="val" id="dailyWins">--</span></div>
+    </div>
+
+    <!-- Positions -->
+    <div class="panel">
+      <h2>Open Positions (<span id="posCount">0</span>)</h2>
+      <div id="positionsTable">Loading...</div>
+    </div>
+
+    <!-- Safety -->
+    <div class="panel">
+      <h2>Safety Circuits</h2>
+      <div class="metric"><span>Max Positions</span><span class="val">3</span></div>
+      <div class="metric"><span>Max Leverage</span><span class="val">2x</span></div>
+      <div class="metric"><span>Risk/Trade</span><span class="val">1.5%</span></div>
+      <div class="metric"><span>Daily Loss Cap</span><span class="val">$50</span></div>
+      <div class="metric"><span>Max Drawdown</span><span class="val">20%</span></div>
+      <div class="metric"><span>Total Trades</span><span class="val" id="totalTrades">--</span></div>
+      <div class="metric"><span>Total Wins</span><span class="val" id="totalWins">--</span></div>
+    </div>
+
+    <!-- Signals -->
+    <div class="panel">
+      <h2>Latest Signals (<span id="sigCount">0</span>)</h2>
+      <div id="signalsTable">Loading...</div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="panel">
+      <h2>Alerts</h2>
+      <div class="alerts" id="alertsBox">No alerts</div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="panel">
+      <h2>Quick Actions</h2>
+      <button class="btn" onclick="location.reload()">Refresh</button>
+      <button class="btn" onclick="window.open('/api/live/monitor','_blank')">Monitor JSON</button>
+      <button class="btn" onclick="window.open('/api/live/positions','_blank')">Positions JSON</button>
+      <button class="btn" onclick="window.open('/api/live/signal-feed','_blank')">Signal Feed JSON</button>
+      <button class="btn danger" onclick="haltDesk()">Halt Desk</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>Desk5 Autonomous Trading Desk</span>
+    <span id="serverTime">--</span>
+  </div>
+</div>
+
+<script>
+const API = {
+  monitor: '/api/live/monitor',
+  positions: '/api/live/positions',
+  signals: '/api/live/signal-feed'
+};
+
+let lastAlerts = [];
+
+async function fetchData() {
+  try {
+    const [mon, pos, sig] = await Promise.all([
+      fetch(API.monitor).then(r => r.json()),
+      fetch(API.positions).then(r => r.json()),
+      fetch(API.signals).then(r => r.json())
+    ]);
+
+    updateCapital(mon, pos);
+    updatePositions(pos);
+    updateSignals(sig);
+    updateStatus(mon);
+    updateAlerts(pos);
+
+    document.getElementById('lastUpdate').textContent = 'Last update: ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    console.error('Fetch error:', e);
+  }
+}
+
+function updateCapital(mon, pos) {
+  document.getElementById('bankroll').textContent = '$' + (mon.estimated_bankroll || 0).toFixed(2);
+  document.getElementById('peakBankroll').textContent = '$' + (mon.peak_bankroll || 0).toFixed(2);
+  document.getElementById('drawdown').textContent = mon.drawdown_msg || '--';
+  document.getElementById('unrealized').textContent = '$' + (pos.total_unrealized_pnl || 0).toFixed(2);
+  document.getElementById('realized').textContent = '$' + (pos.total_realized_pnl || 0).toFixed(2);
+  document.getElementById('dailyLoss').textContent = '$' + (mon.daily_loss || 0).toFixed(2);
+  document.getElementById('dailyWins').textContent = '$' + (mon.daily_wins || 0).toFixed(2);
+  document.getElementById('totalTrades').textContent = mon.total_trades || 0;
+  document.getElementById('totalWins').textContent = mon.total_wins || 0;
+
+  // Colorize
+  const unreal = document.getElementById('unrealized');
+  if ((pos.total_unrealized_pnl || 0) >= 0) unreal.className = 'val pos'; else unreal.className = 'val neg';
+  const dd = document.getElementById('drawdown');
+  if ((mon.drawdown_msg || '').includes('MAX')) dd.className = 'val neg'; else dd.className = 'val';
+}
+
+function updatePositions(pos) {
+  const box = document.getElementById('positionsTable');
+  const count = pos.open_count || 0;
+  document.getElementById('posCount').textContent = count;
+
+  if (!count) {
+    box.innerHTML = '<div style="color:var(--muted)">No open positions</div>';
+    return;
+  }
+
+  // Build table from positions array if available, else show summary
+  const positions = pos.positions || [];
+  if (!positions.length) {
+    box.innerHTML = '<div style="color:var(--muted)">Positions data loading...</div>';
+    return;
+  }
+
+  let html = '<table><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>PnL</th></tr>';
+  for (const p of positions) {
+    const sideClass = p.side === 'LONG' ? 'long' : 'short';
+    const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg';
+    html += `<tr>
+      <td class="coin">${p.coin}</td>
+      <td class="${sideClass}">${p.side}</td>
+      <td>${p.size?.toFixed ? p.size.toFixed(4) : p.size}</td>
+      <td>${p.entry_px || '--'}</td>
+      <td>${p.mark_px || '--'}</td>
+      <td class="${pnlClass}">$${(p.unrealized_pnl || 0).toFixed(2)}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  box.innerHTML = html;
+}
+
+function updateSignals(sig) {
+  const box = document.getElementById('signalsTable');
+  const signals = (sig.signals || []).slice(0, 10);
+  document.getElementById('sigCount').textContent = sig.count || 0;
+
+  if (!signals.length) {
+    box.innerHTML = '<div style="color:var(--muted)">No active signals</div>';
+    return;
+  }
+
+  let html = '<table><tr><th>Coin</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Source</th></tr>';
+  for (const s of signals) {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    html += `<tr>
+      <td class="coin">${s.coin}</td>
+      <td class="${dirClass}">${s.direction}</td>
+      <td>${s.entry_px}</td>
+      <td>${s.sl_px}</td>
+      <td>${s.tp_px}</td>
+      <td>${s.source || '--'}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  box.innerHTML = html;
+}
+
+function updateStatus(mon) {
+  const badge = document.getElementById('statusBadge');
+  if (mon.halted) {
+    badge.textContent = 'HALTED: ' + (mon.halt_reason || 'Unknown');
+    badge.className = 'status-badge halted';
+  } else if (mon.live_mode) {
+    badge.textContent = 'LIVE TRADING';
+    badge.className = 'status-badge live';
+  } else {
+    badge.textContent = 'PAPER MODE';
+    badge.className = 'status-badge';
+  }
+  document.getElementById('serverTime').textContent = mon.updated_at ? new Date(mon.updated_at).toLocaleString() : '--';
+}
+
+function updateAlerts(pos) {
+  const box = document.getElementById('alertsBox');
+  const alerts = pos.alerts || [];
+  if (!alerts.length) {
+    box.innerHTML = '<div style="color:var(--muted)">No alerts</div>';
+    return;
+  }
+  // Only show new alerts
+  const newAlerts = alerts.filter(a => !lastAlerts.includes(a));
+  lastAlerts = alerts;
+  
+  let html = '';
+  for (const a of alerts.slice(-10)) {
+    html += `<div class="alert-item">${a.replace(/\n/g, '<br>')}</div>`;
+  }
+  box.innerHTML = html;
+}
+
+function haltDesk() {
+  if (!confirm('EMERGENCY HALT: Stop all trading immediately?')) return;
+  fetch('/api/live/execute', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'halt'})
+  }).then(r => r.json()).then(data => {
+    alert(data.status || 'Halt signal sent');
+    fetchData();
+  }).catch(e => alert('Error: ' + e));
+}
+
+// Initial load + auto-refresh every 5 seconds
+fetchData();
+setInterval(fetchData, 5000);
+</script>
+</body>
+</html>

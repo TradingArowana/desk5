@@ -1,0 +1,39 @@
+.env
+.solana_wallet.key
+.env.local
+.env.production
+.env.backup
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Data
+data_store/*.jsonl
+data_store/*.log
+data_store/*.bak*
+data_store/live_ledger.json
+data_store/capital_tracker.json
+data_store/tracker.json
+
+# Hermes / system
+: 
+BASHSCRIPT
+DATA
+EOF
+ENDOFFILE
+FIN
+HERMEOF
+PATCH
+PYEOF
+SHEOF
+Y-%m-%dT%H:%M:%SZ

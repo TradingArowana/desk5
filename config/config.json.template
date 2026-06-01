@@ -1,0 +1,23 @@
+{
+  "sentinel": {
+    "interval_seconds": 300,
+    "twitter": {
+      "type": "nitter",
+      "bearer_token": null,
+      "watch_accounts": [],
+      "keywords": []
+    },
+    "nitter": {
+      "instances": [
+        "https://nitter.net",
+        "https://nitter.pussthecat.org",
+        "https://nitter.it"
+      ],
+      "request_timeout": 15,
+      "retries": 3
+    },
+    "database": {
+      "path": "data_store/sentinel.db"
+    }
+  }
+}

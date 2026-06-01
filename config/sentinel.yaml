@@ -1,0 +1,29 @@
+sentinel:
+  interval_seconds: 300
+  twitter:
+    type: nitter
+    bearer_token: null
+    watch_accounts:
+      - vitalikbuterin
+      - elonmusk
+      - cz_binance
+    keywords:
+      - bitcoin
+      - ethereum
+      - airdrop
+      - pump
+    bot_detection:
+      min_followers: 10
+      max_following_ratio: 50.0
+      enable_llm_check: false
+  nitter:
+    instances:
+      - https://nitter.net
+      - https://nitter.pussthecat.org
+      - https://nitter.it
+      - https://nitter.cz
+    request_timeout: 15
+    retries: 3
+    max_results_per_run: 50
+  database:
+    path: data_store/sentinel.db
