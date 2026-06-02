@@ -120,6 +120,7 @@ def _load_exec_state() -> dict:
             pass
     return {
         "today": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "day_start_equity": 0.0,
         "daily_loss": 0.0,
         "daily_wins": 0.0,
         "halted": False,
@@ -194,32 +195,50 @@ def cancel_all_open_orders(exchange: Exchange = None) -> dict:
 def _safety_check(state: dict) -> tuple[bool, str]:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.get("today") != today:
+        # New day: snapshot equity and reset all counters
         state["today"] = today
         state["daily_loss"] = 0.0
         state["daily_wins"] = 0.0
         state["halted"] = False
         state["halt_reason"] = None
+        # Snapshot real equity at day open; fall back to peak if fetch fails
+        try:
+            br = _estimate_bankroll(state)
+            state["day_start_equity"] = br if br > 0 else state.get("peak_bankroll", _START_BANKROLL)
+        except Exception:
+            state["day_start_equity"] = state.get("peak_bankroll", _START_BANKROLL)
         _save_exec_state(state)
 
     if state.get("halted"):
         return False, state.get("halt_reason", "Halted")
 
-    # Dynamic daily loss cap — 10% of live bankroll, min $50
-    br = _estimate_bankroll(state)
-    daily_loss_cap = max(50.0, br * 0.10)
-    if state["daily_loss"] >= daily_loss_cap:
+    # Fixed daily loss cap — 10% of day-start equity, never floating
+    day_start = state.get("day_start_equity", _START_BANKROLL)
+    if day_start <= 0:
+        day_start = _START_BANKROLL
+    daily_loss_cap = max(50.0, day_start * 0.10)
+
+    # Net daily P&L (wins - losses). A profitable day does NOT halt.
+    daily_net = state.get("daily_wins", 0) - state.get("daily_loss", 0)
+    if daily_net <= -daily_loss_cap:
         state["halted"] = True
-        state["halt_reason"] = f"Daily loss ${state['daily_loss']:.2f} >= cap ${daily_loss_cap:.2f} (10% of ${br:.2f})"
+        state["halt_reason"] = f"Daily net PnL ${daily_net:.2f} hit cap -${daily_loss_cap:.2f} (10% of day-start ${day_start:.2f})"
         _save_exec_state(state)
         return False, state["halt_reason"]
 
+    # Profit lock: if up >5% of day-start, throttle to max 2 positions
+    if daily_net >= day_start * 0.05:
+        max_pos = 2   # profit-lock throttle
+        reason = f"PROFIT LOCK: +${daily_net:.2f} (>5% of day-start) — throttled to {max_pos} positions"
+    else:
+        max_pos = _max_positions(_estimate_bankroll(state))
+        reason = "OK"
+
     open_count = len([p for p in _load_ledger() if p.get("status") == "OPEN"])
-    max_pos = _max_positions(br)
     if open_count >= max_pos:
-        return False, f"Max {max_pos} positions open ({open_count})"
+        return False, f"Max {max_pos} positions open ({open_count})" + (f" | {reason}" if "PROFIT" in reason else "")
 
     # - Live reconciliation guard -
-    # Auto-reconcile mismatch; only halt if reconciliation itself fails
     try:
         from workers.execution.hl_bridge import get_positions
         api_positions = get_positions()
@@ -230,7 +249,6 @@ def _safety_check(state: dict) -> tuple[bool, str]:
 
         if api_coins != ledger_coins:
             logger.warning("Reconciliation diff detected: API=%s vs LEDGER=%s — auto-reconciling", api_coins, ledger_coins)
-            # Auto-heal using existing sync logic (without placing close orders)
             live_dict = {p["coin"]: p for p in api_positions}
             any_change = False
             for pos in ledger:
@@ -241,7 +259,7 @@ def _safety_check(state: dict) -> tuple[bool, str]:
                     pos["status"] = "CLOSED"
                     pos["closed_at"] = datetime.now(timezone.utc).isoformat()
                     pos["exit_reason"] = "RECONCILED_GONE"
-                    pos["pnl"] = pos.get("unrealized_pnl", 0)
+                    # Phantom P&L does NOT hit daily_loss — only real closes do
                     any_change = True
             ledger_dict = {p["coin"]: p for p in ledger if p.get("status") == "OPEN"}
             for lp in api_positions:
@@ -267,7 +285,6 @@ def _safety_check(state: dict) -> tuple[bool, str]:
                 _save_ledger(ledger)
                 state["positions_open"] = len([p for p in ledger if p.get("status") == "OPEN"])
                 _save_exec_state(state)
-            # Re-check after healing
             ledger_coins = {(p.get("coin"), p.get("direction")) for p in ledger if p.get("status") == "OPEN"}
             if api_coins != ledger_coins:
                 state["halted"] = True
@@ -279,7 +296,11 @@ def _safety_check(state: dict) -> tuple[bool, str]:
     except Exception as exc:
         logger.warning("Reconciliation check failed: %s — proceeding with caution", exc)
 
-    return True, "OK"
+    return True, reason
+
+def _profit_lock_active(state: dict) -> bool:
+    daily_net = state.get("daily_wins", 0) - state.get("daily_loss", 0)
+    return daily_net >= state.get("day_start_equity", _START_BANKROLL) * 0.05
 
 def _estimate_bankroll(state: dict) -> float:
     """Use TOTAL account equity for sizing — perp + free spot in unified margin."""
@@ -495,12 +516,8 @@ def sync_positions() -> dict:
             pos["status"] = "CLOSED"
             pos["closed_at"] = datetime.now(timezone.utc).isoformat()
             pos["exit_reason"] = "RECONCILED_GONE"
-            pos["pnl"] = pos.get("unrealized_pnl", 0)
+            pos["pnl"] = 0  # phantom P&L does NOT count toward daily
             any_closed = True
-            if pos["pnl"] > 0:
-                state["daily_wins"] = state.get("daily_wins", 0) + pos["pnl"]
-            else:
-                state["daily_loss"] = state.get("daily_loss", 0) + abs(pos["pnl"])
             alerts.append(f"⚠️ {coin} {pos.get('direction','?')} marked CLOSED (no longer on HL)")
 
     # Add missing positions from HL into ledger

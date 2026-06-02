@@ -13,10 +13,14 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 import requests
 
@@ -46,6 +50,15 @@ class Signal:
     dt: str                # ISO
     status: str = "OPEN"   # OPEN | FILLED | CLOSED | CANCELLED
     size_usd: float = 20.0
+    vol_24h: float = 0.0
+    volume_24h: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Signal":
+        """Drop any stray keys (e.g. _source) so JSON merges don't crash."""
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in allowed})
+
 
 @dataclass
 class Trade:
@@ -62,72 +75,75 @@ class Trade:
 # ---------------------------------------------------------------------------
 # Price data (paper / mock feed using CG OHLC)
 # ---------------------------------------------------------------------------
-_CG_IDS: Dict[str, str] = {}
+_HL_TO_CG_ID = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "AVAX": "avalanche-2",
+    "PAXG": "pax-gold", "DOGE": "dogecoin", "LINK": "chainlink",
+    "MATIC": "matic-network", "ARB": "arbitrum", "GMX": "gmx", "BNB": "binancecoin",
+    "XRP": "ripple", "ADA": "cardano", "DOT": "polkadot", "OP": "optimism",
+    "ATOM": "cosmos", "APE": "apecoin", "INJ": "injective-protocol",
+    "SUI": "sui", "CRV": "curve-dao-token", "LDO": "lido-dao", "STX": "blockstack",
+    "RNDR": "render-token", "FTM": "fantom", "SNX": "havven", "BCH": "bitcoin-cash",
+    "APT": "aptos", "AAVE": "aave", "COMP": "compound-governance-token",
+    "MKR": "maker", "WLD": "worldcoin-wld", "TRX": "tron",
+}
 _CG_OHLC_CACHE: Dict[str, tuple[float, List[List[float]]]] = {}  # coin_id: (timestamp, data)
 
-OHLC_CACHE_TTL = 300.0  # 5min
-OHLC_SLEEP = 6.0  # free tier ~10 req/min
+CG_OHLC_URL = "https://api.coingecko.com/api/v3/coins/{id}/ohlc"
 
-# Top-25 correct CoinGecko IDs (symbols that map to the real tokens we trade on HL)
-_CORRECT_CG_IDS = {
-    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin",
-    "AVAX": "avalanche-2", "LINK": "chainlink", "BNB": "binancecoin", "XRP": "ripple",
-    "ADA": "cardano", "DOT": "polkadot", "ATOM": "cosmos", "CRV": "curve-dao-token",
-    "LDO": "lido-dao", "GMX": "gmx", "SUI": "sui", "PAXG": "pax-gold",
-    "AAVE": "aave", "COMP": "compound-governance-token", "TRX": "tron",
-    "APE": "apecoin", "APT": "aptos", "BCH": "bitcoin-cash", "SNX": "havven",
-    "INJ": "injective-protocol", "STX": "blockstack", "PEPE": "pepe",
-    "OP": "optimism", "ARB": "arbitrum", "WBTC": "wrapped-bitcoin",
-    "WETH": "weth", "USDC": "usd-coin", "USDT": "tether",
-}
+_CG_OHLC_CACHE_FILE = STATE_DIR / "cg_ohlc_cache.json"
+_OHLC_CACHE_TTL = 3600  # 1 hour
 
-def _load_cg_ids() -> Dict[str, str]:
-    """Return hardcoded + cached CG IDs. Only fetches from API for unknown symbols."""
-    global _CG_IDS
-    if _CG_IDS:
-        return _CG_IDS
-    # Start with hardcoded whitelist
-    _CG_IDS = dict(_CORRECT_CG_IDS)
-    # Attempt to augment from API, but don't overwrite hardcoded entries
+def _load_cg_ohlc_cache(coin_id: str) -> List[List[float]]:
+    """Read OHLC from the hl_candle_fetcher cache (cg_ohlc_cache.json)."""
+    if not _CG_OHLC_CACHE_FILE.exists():
+        return []
     try:
-        r = requests.get(COINGECKO_IDS_URL, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        for c in data:
-            sym = c.get("symbol", "").upper()
-            cid = c.get("id", "")
-            if sym and cid and sym not in _CG_IDS:
-                _CG_IDS[sym] = cid
+        payload = json.loads(_CG_OHLC_CACHE_FILE.read_text())
+        entry = payload.get("data", {}).get(coin_id, {})
+        ohlc = entry.get("ohlc", [])
+        if not ohlc:
+            return []
+        # Convert from dict {o,h,l,c} to list [timestamp,o,h,l,c]
+        out = []
+        for i, c in enumerate(ohlc):
+            ts = int(datetime.now(timezone.utc).timestamp()) - (len(ohlc)-i)*900
+            out.append([
+                ts,
+                float(c.get("o", 0)),
+                float(c.get("h", 0)),
+                float(c.get("l", 0)),
+                float(c.get("c", 0)),
+            ])
+        return out
+    except Exception as exc:
+        logger.warning("Cache read failed for %s: %s", coin_id, exc)
+        return []
+
+
+def _is_cache_fresh() -> bool:
+    if not _CG_OHLC_CACHE_FILE.exists():
+        return False
+    try:
+        payload = json.loads(_CG_OHLC_CACHE_FILE.read_text())
+        ts = payload.get("meta", {}).get("updated_at")
+        if not ts:
+            return False
+        updated = datetime.fromisoformat(ts)
+        return (datetime.now(timezone.utc) - updated).total_seconds() < _OHLC_CACHE_TTL
     except Exception:
-        logger.debug("Failed to load CG coin list (non-critical, using whitelist)")
-    return _CG_IDS
+        return False
+
 
 def fetch_ohlc_gc(coin_id: str, days: int = 1) -> List[List[float]]:
+    """Fetch OHLC — read from hl_candle_fetcher cache first, fallback never hits CG API."""
     if USE_DEMO_PRICES:
         return _demo_ohlc(coin_id)
-    now = datetime.now(timezone.utc).timestamp()
-    key = f"{coin_id}:{days}"
-    cached = _CG_OHLC_CACHE.get(key)
-    if cached and now - cached[0] < OHLC_CACHE_TTL:
-        return cached[1]
-    try:
-        # Respect CG free-tier rate limit
-        time.sleep(OHLC_SLEEP)
-        r = requests.get(
-            COINGECKO_OHLC_URL.format(id=coin_id),
-            params={"vs_currency": "usd", "days": days},
-            timeout=30,
-        )
-        if r.status_code == 429:
-            logger.warning("CG rate limit for %s", coin_id)
-            return _demo_ohlc()
-        r.raise_for_status()
-        data = r.json()
-        _CG_OHLC_CACHE[key] = (now, data)
-        return data
-    except Exception as exc:
-        logger.warning("CG OHLC fetch failed for %s: %s — using demo data", coin_id, exc)
-        return _demo_ohlc()
+    # Always prefer the local HL cache
+    cached = _load_cg_ohlc_cache(coin_id)
+    if cached:
+        return cached
+    logger.warning("No cache for %s — returning empty (no live CG fetch)", coin_id)
+    return []
 
 
 def _demo_ohlc(coin_id: str = "") -> List[List[float]]:
@@ -180,7 +196,7 @@ def micro_range_and_volume(ohlc: List[List[float]]) -> Dict[str, Any]:
 # Signal generator
 # ---------------------------------------------------------------------------
 def generate_signals(watchlist: List[Dict[str, Any]]) -> List[Signal]:
-    cg_ids = _load_cg_ids() if not USE_DEMO_PRICES else {}
+    cg_ids = _HL_TO_CG_ID
     signals: List[Signal] = []
     for coin in watchlist[:20]:
         sym = coin["symbol"].upper()
@@ -246,13 +262,13 @@ def _save_json(path: Path, data: List[Dict[str, Any]]) -> None:
 
 def load_open_signals() -> List[Signal]:
     rows = _load_json(SIGNALS_PATH)
-    return [Signal(**r) for r in rows if r.get("status") == "OPEN"]
+    return [Signal.from_dict(r) for r in rows if r.get("status") == "OPEN"]
 
 def save_signals(signals: List[Signal]) -> None:
     existing = _load_json(SIGNALS_PATH)
     # merge by coin+direction — only keep latest signal per coin+direction (no unbounded growth)
     key = lambda s: f"{s.coin}|{s.direction}"
-    mp = {key(Signal(**r)): r for r in existing}
+    mp = {key(Signal.from_dict(r)): r for r in existing}
     for s in signals:
         mp[key(s)] = asdict(s)  # overwrite older signal for same coin+direction
     # Also prune anything older than 2 hours that's still OPEN (stale)
@@ -289,7 +305,7 @@ def run_paper_update() -> List[Dict[str, Any]]:
     Walk open signals against latest price and close when SL/TP/trail hit.
     Returns list of closed round-trips.
     """
-    cg_ids = _load_cg_ids() if not USE_DEMO_PRICES else {}
+    cg_ids = _HL_TO_CG_ID
     open_sigs = load_open_signals()
     if not open_sigs:
         return []

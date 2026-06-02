@@ -7,7 +7,6 @@ import json, logging, math, sys, os
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from workers.strategies.vol_squeeze import scan_squeezes as vs_scan
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 LIVE_MODE = os.environ.get("LIVE_MODE", "").lower() == "true"
 if LIVE_MODE:
     try:
-        from workers.execution.hl_executor import place_order
+        from workers.execution.hl_executor import place_order, _load_exec_state, _check_drawdown, _safety_check
         EXECUTOR_AVAILABLE = True
     except Exception as exc:
         logger.error("Executor import failed in live mode: %s", exc)
@@ -28,12 +27,7 @@ if LIVE_MODE:
 STATE_DIR = Path(__file__).parent.parent.parent / "data_store"
 ALERT_STATE = STATE_DIR / "alert_state.json"
 
-# Safety limits for live pilot
-MAX_DRAWDOWN_PCT = 20.0
-MAX_DAILY_LOSS_USD = 50.0
-RISK_PER_TRADE_PCT = 0.015  # 1.5%
-MAX_POSITIONS = 3
-MIN_CONFIDENCE = 0.6
+RISK_PER_TRADE_PCT = 0.02  # 2% matches executor
 
 CG_OHLC_MAP = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "AVAX": "avalanche-2",
@@ -56,11 +50,7 @@ def _load_alert_state() -> dict:
             pass
     return {
         "last_alerts": {},
-        "daily_loss": 0.0,
         "today": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "halted": False,
-        "halt_reason": None,
-        "positions_open": 0,
     }
 
 
@@ -68,25 +58,26 @@ def _save_alert_state(state: dict):
     ALERT_STATE.write_text(json.dumps(state, indent=2))
 
 
-def _check_safety(state: dict, bankroll: float = 3534) -> tuple[bool, str]:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if state.get("today") != today:
-        state["daily_loss"] = 0.0
-        state["today"] = today
-        state["halted"] = False
-        state["halt_reason"] = None
-    if state.get("halted"):
-        return False, state.get("halt_reason", "Trading halted")
-    if state["daily_loss"] >= MAX_DAILY_LOSS_USD:
-        state["halted"] = True
-        state["halt_reason"] = f"Daily loss ${state['daily_loss']:.2f} >= cap ${MAX_DAILY_LOSS_USD}"
-        return False, state["halt_reason"]
-    if state.get("positions_open", 0) >= MAX_POSITIONS:
-        return False, f"Max {MAX_POSITIONS} positions open"
-    return True, "OK"
+def _check_safety() -> tuple[bool, str]:
+    """Delegate all safety checks to hl_executor — single source of truth."""
+    if not EXECUTOR_AVAILABLE:
+        return False, "Executor unavailable"
+    try:
+        exec_state = _load_exec_state()
+        ok, reason = _safety_check(exec_state)
+        if not ok:
+            return False, reason
+        # Also check drawdown
+        ok2, reason2 = _check_drawdown(exec_state)
+        if not ok2:
+            return False, reason2
+        return True, reason
+    except Exception as exc:
+        logger.error("Safety check failed: %s", exc)
+        return False, f"Safety error: {exc}"
 
 
-def format_alert(signal: dict, marks: Dict[str, float], bankroll: float = 3534) -> str:
+def format_alert(signal: dict, marks: Dict[str, float], bankroll: float = 3500) -> str:
     """Format a signal into a Telegram-ready alert message."""
     coin = signal["coin"]
     direction = signal["direction"]
@@ -108,21 +99,17 @@ Risk: ${risk_usd:.2f} ({RISK_PER_TRADE_PCT*100:.1f}%)
 Suggested Size: {size:.4f} units
 R/R: 1:{abs(tp-entry)/abs(entry-sl):.1f}
 
-⚠️ Execute manually on Hyperliquid
-🛡️ Max DD: {MAX_DRAWDOWN_PCT}% | Daily Loss Cap: ${MAX_DAILY_LOSS_USD}
-📊 Current Bankroll: ${bankroll:.2f}
-
 Signal: {signal.get("source", "unknown")}
 """
     return msg
 
 
-def run_alert_cycle(bankroll: float = 3534, dry_run: bool = False) -> List[str]:
+def run_alert_cycle(bankroll: float = 3500, dry_run: bool = False) -> List[str]:
     """Scan all strategies, execute if live, return alert messages."""
-    # Re-read live mode each cycle so .env edits take effect without restart
     _live = os.environ.get("LIVE_MODE", "").lower() == "true"
-    state = _load_alert_state()
-    allowed, reason = _check_safety(state, bankroll)
+    
+    # Unified safety gate
+    allowed, reason = _check_safety()
     alerts = []
     
     if not allowed:
@@ -132,6 +119,7 @@ def run_alert_cycle(bankroll: float = 3534, dry_run: bool = False) -> List[str]:
     
     marks = get_all_marks()
     coins = [c for c in list(CG_OHLC_MAP.keys()) if CG_OHLC_MAP.get(c)]
+    state = _load_alert_state()
     
     # Vol Squeeze
     vs_signals = vs_scan(coins)

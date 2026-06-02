@@ -1,7 +1,7 @@
 """
 Hyperliquid API Bridge.
 Reads positions, funding rates, and mark prices.
-API key loaded from ./.env
+API key loaded from /home/darkside/projects/desk5/.env
 """
 import os, json, logging, time
 from pathlib import Path

@@ -97,8 +97,11 @@ Deposit USDC to your Hyperliquid address. The bot uses your full balance as "ban
 
 ## Architecture
 
+All price feeds come from **Hyperliquid's public `/info` API** — no CoinGecko API key required, no rate limits. Strategies read from a local cache that must be populated first.
+
 | Component | Description | Schedule |
 |---|---|---|
+| `hl_candle_fetcher.py` | Native HL candle prefetch (→ cache) | Every 15 min |
 | `hl_breakout.py` | Breakout signal generator | Every 5 min |
 | `hl_vol_squeeze.py` | Volatility squeeze detector | Every 5 min (staggered) |
 | `quick_scalp_v2.py` | Micro-range scalp signals | Every 5 min (staggered) |
@@ -113,9 +116,10 @@ Deposit USDC to your Hyperliquid address. The bot uses your full balance as "ban
 | Limit | Value |
 |---|---|
 | Max drawdown halt | 20% from peak |
-| Daily loss cap | 10% of bankroll |
+| Daily loss cap | 10% of **day-start** equity (fixed) |
+| Profit lock | Throttled to 2 positions when net daily PnL > +5% |
 | Max leverage | 5x |
-| Risk per trade | 2% of live bankroll |
+| Risk per trade | 2% of day-start bankroll |
 | Max concurrent positions | 5–12 (scales with bankroll) |
 
 ---
@@ -195,7 +199,7 @@ Before risking real money, you can backtest strategies on historical data and ru
 Send this to your Hermes bot:
 
 ```
-Backtest all strategies in workers/strategies/ against the last 30 days of Hyperliquid OHLC data. Use CoinGecko as price source. Report win rate, average R:R, max drawdown, and profit factor for each strategy. Recommend which ones are safe to run live.
+Backtest all strategies in workers/strategies/ against the last 30 days of Hyperliquid OHLC data. Use the native HL candle cache as price source. Report win rate, average R:R, max drawdown, and profit factor for each strategy. Recommend which ones are safe to run live.
 ```
 
 Desk5 includes `workers/strategies/backtest_quick_scalp.py` as a reference — Hermes can adapt it for any strategy file you add.
