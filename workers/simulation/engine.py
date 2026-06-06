@@ -1,6 +1,6 @@
 """
 Desk5 Multi-Strategy Simulation Engine v2.
-30 random tokens per run, 50 passes, includes PAXG/SPX macro assets.
+30 random tokens per run, 50 passes, includes macro assets.
 """
 import os
 import json

@@ -32,5 +32,5 @@ Next signal will auto-execute.
 
 import requests
 url = f"https://api.telegram.org/bot{token}/sendMessage"
-r = requests.post(url, json={"chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),"text":msg,"parse_mode":"Markdown"}, timeout=15)
+r = requests.post(url, json={"chat_id":"434497042","text":msg,"parse_mode":"Markdown"}, timeout=15)
 print(f"Telegram: {r.status_code}")

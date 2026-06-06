@@ -11,7 +11,7 @@ import os
 import requests
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Any
 
 logger = logging.getLogger("revenue_div")
 
@@ -107,9 +107,9 @@ def run_revenue_scan() -> dict:
     """Run all diversifier scans and emit alerts."""
     funding = get_funding_opportunities()
     asym = get_asymmetric_pocket_signals()
-
+    
     alerts = []
-
+    
     # Funding harvest alerts
     if funding:
         for opp in funding[:3]:
@@ -119,7 +119,7 @@ def run_revenue_scan() -> dict:
                 f"8h funding: `{opp['funding_8h']:.5f}`\n"
                 f"{opp['note']}"
             )
-
+    
     # Asymmetric pocket
     if asym:
         for opp in asym[:3]:
@@ -128,25 +128,25 @@ def run_revenue_scan() -> dict:
                 f"{opp['coin']} {opp['direction']} @ ${opp['price']}\n"
                 f"{opp['note']}"
             )
-
+    
     # Send all alerts
     for msg in alerts:
         send_telegram(msg)
-
+    
     result = {
         "dt": datetime.now(timezone.utc).isoformat(),
         "funding_opps": funding,
         "asymmetric_opps": asym,
         "alerts_sent": len(alerts),
     }
-
+    
     # Persist
     out_path = STATE_DIR / "revenue_scan.json"
     out_path.write_text(json.dumps(result, indent=2, default=str))
-
+    
     logger.info("Revenue scan: %d funding, %d asymmetric, %d alerts sent",
                 len(funding), len(asym), len(alerts))
-
+    
     return result
 
 

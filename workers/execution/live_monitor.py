@@ -17,7 +17,7 @@ MONITOR_STATE = STATE_DIR / "live_monitor_state.json"
 
 MAX_DRAWDOWN_PCT = 20.0
 MAX_DAILY_LOSS_USD = 50.0
-START_BANKROLL = 1021.0
+START_BANKROLL = 1000.0
 
 
 def _load_state() -> dict:

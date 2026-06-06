@@ -244,12 +244,6 @@ def api_solana_deposit():
         "deposit_us": "Send SOL or SPL tokens to this address. Deposits polled every 60s.",
     })
 
-    from workers.capital.tracker import get_capital_snapshot
-    try:
-        return jsonify(get_capital_snapshot()), 200
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-
 # ---- Capital / Paper Gate ------------------------------------------------
 
 @app.route("/api/capital")

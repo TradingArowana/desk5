@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Scaling safety constants — ALL scale with live bankroll for compounding
 # ---------------------------------------------------------------------------
-MAX_DRAWDOWN_PCT   = 20.0     # Halt at 15% from peak (always %)
+MAX_DRAWDOWN_PCT   = 35.0     # Catastrophic emergency brake only — 35% from ALL-TIME peak
 MAX_LEVERAGE       = 5        # 5x leverage — stays fixed
 RISK_PER_TRADE_PCT = 0.02     # 2% risk per trade (scales with bankroll)
-_START_BANKROLL    = 3534.41  # Synced to live equity (auto-updates)
+_START_BANKROLL    = 1000.0  # Synced to live equity (auto-updates)
 
 # Dynamic scalers — scale with live bankroll for compounding
 def _max_positions(br: float) -> int:
@@ -226,13 +226,9 @@ def _safety_check(state: dict) -> tuple[bool, str]:
         _save_exec_state(state)
         return False, state["halt_reason"]
 
-    # Profit lock: if up >5% of day-start, throttle to max 2 positions
-    if daily_net >= day_start * 0.05:
-        max_pos = 2   # profit-lock throttle
-        reason = f"PROFIT LOCK: +${daily_net:.2f} (>5% of day-start) — throttled to {max_pos} positions"
-    else:
-        max_pos = _max_positions(_estimate_bankroll(state))
-        reason = "OK"
+    # Profit-lock logic removed — no throttle for winning days
+    max_pos = _max_positions(_estimate_bankroll(state))
+    reason = "OK"
 
     open_count = len([p for p in _load_ledger() if p.get("status") == "OPEN"])
     if open_count >= max_pos:
@@ -271,8 +267,8 @@ def _safety_check(state: dict) -> tuple[bool, str]:
                         "direction": lp["side"],
                         "entry_px": lp["entry_px"],
                         "size": lp["size"],
-                        "sl_px": round(lp["entry_px"] * 0.985, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 1.015, 6),
-                        "tp_px": round(lp["entry_px"] * 1.02, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 0.98, 6),
+                        "sl_px": round(lp["entry_px"] * 0.98, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 1.02, 6),
+                        "tp_px": round(lp["entry_px"] * 1.05, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 0.95, 6),
                         "status": "OPEN",
                         "open_at": datetime.now(timezone.utc).isoformat(),
                         "mark_px": lp["mark_px"],
@@ -286,28 +282,45 @@ def _safety_check(state: dict) -> tuple[bool, str]:
                 state["positions_open"] = len([p for p in ledger if p.get("status") == "OPEN"])
                 _save_exec_state(state)
             ledger_coins = {(p.get("coin"), p.get("direction")) for p in ledger if p.get("status") == "OPEN"}
+            # Retry count: only halt after 3 failed reconciliation cycles in same run
+            retry_key = "recon_retries"
             if api_coins != ledger_coins:
-                state["halted"] = True
-                state["halt_reason"] = f"RECONCILIATION MISMATCH PERSISTS: API={api_coins} vs LEDGER={ledger_coins}"
-                _save_exec_state(state)
-                logger.error(state["halt_reason"])
-                return False, state["halt_reason"]
-            logger.info("Auto-reconciled successfully")
+                state[retry_key] = state.get(retry_key, 0) + 1
+                if state[retry_key] >= 3:
+                    state["halted"] = True
+                    state["halt_reason"] = f"RECONCILIATION MISMATCH PERSISTS (3x): API={api_coins} vs LEDGER={ledger_coins}"
+                    _save_exec_state(state)
+                    logger.error(state["halt_reason"])
+                    return False, state["halt_reason"]
+                logger.warning("Recon mismatch #%d — will retry next cycle", state[retry_key])
+                return True, "RECON_RETRY"
+            else:
+                state[retry_key] = 0
     except Exception as exc:
         logger.warning("Reconciliation check failed: %s — proceeding with caution", exc)
 
     return True, reason
 
-def _profit_lock_active(state: dict) -> bool:
-    daily_net = state.get("daily_wins", 0) - state.get("daily_loss", 0)
-    return daily_net >= state.get("day_start_equity", _START_BANKROLL) * 0.05
-
 def _estimate_bankroll(state: dict) -> float:
-    """Use TOTAL account equity for sizing — perp + free spot in unified margin."""
+    """Use TOTAL account equity for sizing — perp + free spot in unified margin.
+    Falls back to latest known good value from capital tracker."""
     from workers.execution.hl_bridge import get_account_value
     account = get_account_value()
-    # Total = perp value + free spot available. This is true tradeable equity.
-    return account.get("total", 0) if account.get("total", 0) > 0 else _START_BANKROLL
+    live = account.get("total", 0)
+    # If API returns 0, use the last known good balance
+    if live > 0:
+        return live
+    ct = PROJECT_ROOT / "data_store" / "capital_tracker.json"
+    if ct.exists():
+        try:
+            d = json.loads(ct.read_text())
+            cached = max(d.get("last_balance", 0), d.get("peak", 0))
+            if cached > 0:
+                return cached
+        except Exception:
+            pass
+    # Absolute emergency fallback only
+    return _START_BANKROLL
 
 def _check_drawdown(state: dict) -> tuple[bool, str]:
     br = _estimate_bankroll(state)
@@ -440,12 +453,18 @@ def place_order(signal: dict, exchange: Exchange = None) -> dict:
             "direction": direction,
             "entry_px": px,
             "size": float(size),
+            "initial_size": float(size),
             "sl_px": round(sl, 6),
             "tp_px": round(tp, 6),
             "status": "OPEN" if accepted else "REJECTED",
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "hl_response": result,
             "pnl": 0.0,
+            "pnl_partial": 0.0,
+            "highest_seen": float(px),
+            "lowest_seen": float(px),
+            "partial_closed_at": None,
+            "sl_breakeven_moved": False,
         }
         ledger.append(pos)
         _save_ledger(ledger)
@@ -532,20 +551,26 @@ def sync_positions() -> dict:
                 "direction": lp["side"],
                 "entry_px": lp["entry_px"],
                 "size": lp["size"],
-                "sl_px": round(lp["entry_px"] * 0.985, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 1.015, 6),
-                "tp_px": round(lp["entry_px"] * 1.02, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 0.98, 6),
+                "initial_size": lp["size"],
+                "sl_px": round(lp["entry_px"] * 0.98, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 1.02, 6),
+                "tp_px": round(lp["entry_px"] * 1.05, 6) if lp["side"] == "LONG" else round(lp["entry_px"] * 0.95, 6),
                 "status": "OPEN",
                 "open_at": datetime.now(timezone.utc).isoformat(),
                 "mark_px": lp["mark_px"],
                 "unrealized_pnl": lp["unrealized_pnl"],
                 "leverage": lp.get("leverage", 1),
                 "reconciled": True,
+                "highest_seen": lp["entry_px"],
+                "lowest_seen": lp["entry_px"],
+                "pnl_partial": 0.0,
+                "partial_closed_at": None,
+                "sl_breakeven_moved": False,
             }
             ledger.append(entry)
             state["positions_open"] = state.get("positions_open", 0) + 1
             alerts.append(f"🔄 RECONCILED {coin} {lp['side']} @ {lp['entry_px']} (size {lp['size']})")
 
-    # 2) SL/TP check on reconciled ledger
+    # 2) Trailing-stop + partial-profit logic on reconciled ledger
     for pos in ledger:
         if pos.get("status") != "OPEN":
             continue
@@ -559,31 +584,102 @@ def sync_positions() -> dict:
         size = pos["size"]
         sl = pos["sl_px"]
         tp = pos["tp_px"]
+        initial_size = pos.get("initial_size", size)
 
+        # Track extremes since entry (for trailing stop)
         if direction == "LONG":
+            pos["highest_seen"] = round(max(pos.get("highest_seen", entry), mark), 6)
+            highest = pos["highest_seen"]
             pnl = (mark - entry) * size
+            sl_dist = abs(entry - sl) if abs(entry - sl) > 0 else entry * 0.02
+            r_multiple = (mark - entry) / sl_dist
             hit_sl = mark <= sl
             hit_tp = mark >= tp
         else:
+            pos["lowest_seen"] = round(min(pos.get("lowest_seen", entry), mark), 6)
+            lowest = pos["lowest_seen"]
             pnl = (entry - mark) * size
+            sl_dist = abs(sl - entry) if abs(sl - entry) > 0 else entry * 0.02
+            r_multiple = (entry - mark) / sl_dist
             hit_sl = mark >= sl
             hit_tp = mark <= tp
 
         pos["unrealized_pnl"] = round(pnl, 4)
 
-        if hit_sl or hit_tp:
-            # ACTUALLY CLOSE THE POSITION ON HYPERLIQUID — this was missing!
-            try:
-                close_direction = "SHORT" if direction == "LONG" else "LONG"
-                is_buy = close_direction == "LONG"
-                close_size = _round_sz(coin, size)
-                if close_size > 0:
+        # --- PARTIAL CLOSE AT +2R (if full size still on) ---
+        if r_multiple >= 2.0 and pos.get("partial_closed_at") is None:
+            half_qty = _round_sz(coin, size * 0.50)
+            if half_qty <= 0:
+                logger.warning("Partial close skipped for %s: calculated half_qty = 0", coin)
+            else:
+                try:
                     ex = _exchange()
-                    close_result = ex.market_open(coin, is_buy, close_size)
-                    logger.info("SL/TP close %s %s: %s", coin, direction, close_result)
+                    res = ex.market_close(coin, sz=half_qty)
+                    logger.info("Partial close %s %s: %s", coin, direction, res)
+                    # Update position bookkeeping
+                    pos["size"] = round(size - half_qty, 6)
+                    pos["pnl_partial"] = round(pos.get("pnl_partial", 0) + (mark - entry) * half_qty if direction == "LONG" else (entry - mark) * half_qty, 4)
+                    pos["partial_closed_at"] = round(mark, 6)
+                    alerts.append(
+                        f"💰 {coin} {direction} PARTIAL CLOSE 50% @ {mark:.4f}\n"
+                        f"Locked: ${pos['pnl_partial']:+.2f} | Remaining: {pos['size']:.4f}"
+                    )
+                    # Continue — do NOT full-close yet; let trail run on remainder
+                except Exception as pexc:
+                    logger.error("Partial close FAILED for %s: %s", coin, pexc)
+                    # If partial close fails, keep full size and continue
+
+        # --- TRAILING STOP ADJUSTMENT ---
+        if r_multiple >= 1.0 and not pos.get("sl_breakeven_moved", False):
+            # Move SL to breakeven once +1R reached
+            pos["sl_px"] = round(entry, 6)
+            pos["sl_breakeven_moved"] = True
+            alerts.append(f"🔒 {coin} {direction} SL moved to BREAKEVEN @ {entry:.4f} (reached +1R)")
+
+        if r_multiple >= 2.0:
+            # Trail at 1R distance behind extreme (tighter after partial)
+            if direction == "LONG":
+                trail = round(highest - sl_dist, 6)
+                if trail > sl:
+                    pos["sl_px"] = trail
+                    alerts.append(f"📉 {coin} LONG trail raised to {trail:.4f} (1R below high {highest:.4f})")
+            else:
+                trail = round(lowest + sl_dist, 6)
+                if trail < sl:
+                    pos["sl_px"] = trail
+                    alerts.append(f"📈 {coin} SHORT trail lowered to {trail:.4f} (1R above low {lowest:.4f})")
+
+        # Re-fetch SL after trail updates for final close check
+        sl = pos["sl_px"]
+
+        if hit_sl or hit_tp:
+            close_qty = _round_sz(coin, pos["size"])
+            if close_qty <= 0:
+                pos["status"] = "CLOSED"
+                pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+                pos["pnl"] = round(pnl, 4)
+                pos["exit_px"] = round(mark, 6)
+                pos["exit_reason"] = "SL" if hit_sl else "TP"
+                any_closed = True
+                # Book total = realized partial + final close
+                total_pnl = pos.get("pnl_partial", 0) + pnl
+                if total_pnl > 0:
+                    state["daily_wins"] = state.get("daily_wins", 0) + total_pnl
+                else:
+                    state["daily_loss"] = state.get("daily_loss", 0) + abs(total_pnl)
+                alerts.append(
+                    f"{'🛑' if hit_sl else '🎯'} {coin} {direction} CLOSED @ {mark:.4f}\n"
+                    f"PnL: ${total_pnl:+.2f} ({'SL' if hit_sl else 'TP'}) | "
+                    f"Partial: ${pos.get('pnl_partial', 0):+.2f}"
+                )
+                continue
+
+            try:
+                ex = _exchange()
+                close_result = ex.market_close(coin, sz=close_qty)
+                logger.info("SL/TP close %s %s: %s", coin, direction, close_result)
             except Exception as close_exc:
                 logger.error("FAILED to close %s on SL/TP: %s", coin, close_exc)
-                # Don't mark closed if close failed — will retry next sync
                 continue
 
             pos["status"] = "CLOSED"
@@ -592,13 +688,15 @@ def sync_positions() -> dict:
             pos["exit_px"] = round(mark, 6)
             pos["exit_reason"] = "SL" if hit_sl else "TP"
             any_closed = True
-            if pnl > 0:
-                state["daily_wins"] = state.get("daily_wins", 0) + pnl
+            total_pnl = pos.get("pnl_partial", 0) + pnl
+            if total_pnl > 0:
+                state["daily_wins"] = state.get("daily_wins", 0) + total_pnl
             else:
-                state["daily_loss"] = state.get("daily_loss", 0) + abs(pnl)
+                state["daily_loss"] = state.get("daily_loss", 0) + abs(total_pnl)
             alerts.append(
                 f"{'🛑' if hit_sl else '🎯'} {coin} {direction} CLOSED @ {mark:.4f}\n"
-                f"PnL: ${pnl:+.2f} | Reason: {pos['exit_reason']}"
+                f"PnL: ${total_pnl:+.2f} ({'SL' if hit_sl else 'TP'}) | "
+                f"Partial: ${pos.get('pnl_partial', 0):+.2f}"
             )
 
     if any_closed:

@@ -120,25 +120,53 @@ def _load_cg_ohlc_cache(coin_id: str) -> List[List[float]]:
         return []
 
 
-def _is_cache_fresh() -> bool:
-    if not _CG_OHLC_CACHE_FILE.exists():
-        return False
-    try:
-        payload = json.loads(_CG_OHLC_CACHE_FILE.read_text())
-        ts = payload.get("meta", {}).get("updated_at")
-        if not ts:
-            return False
-        updated = datetime.fromisoformat(ts)
-        return (datetime.now(timezone.utc) - updated).total_seconds() < _OHLC_CACHE_TTL
-    except Exception:
-        return False
+HL_CANDLES_DIR = STATE_DIR / "candles"
 
+def _load_hl_candle_cache(coin_id: str) -> List[List[float]]:
+    """Read HL 5m candles from the per-coin hl_candle_fetcher cache."""
+    # Map cg_id back to HL coin symbol via the reverse of _HL_TO_CG_ID
+    hl_sym = None
+    for k, v in _HL_TO_CG_ID.items():
+        if v == coin_id:
+            hl_sym = k
+            break
+    for sym in (hl_sym or coin_id).upper(), coin_id:
+        path = HL_CANDLES_DIR / f"hl_candles_{sym}.json"
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text())
+                out: List[List[float]] = []
+                for item in payload:
+                    out.append([
+                        int(item["t"]),
+                        float(item["o"]),
+                        float(item["h"]),
+                        float(item["l"]),
+                        float(item["c"]),
+                    ])
+                return out
+            except Exception as exc:
+                logger.warning("HL cache read failed for %s: %s", sym, exc)
+    return []
+
+def _is_cache_fresh() -> bool:
+    if HL_CANDLES_DIR.exists():
+        try:
+            mtime = max((f.stat().st_mtime for f in HL_CANDLES_DIR.iterdir() if f.suffix == ".json"), default=0)
+            return (datetime.now().timestamp() - mtime) < _OHLC_CACHE_TTL
+        except Exception:
+            pass
+    return False
 
 def fetch_ohlc_gc(coin_id: str, days: int = 1) -> List[List[float]]:
-    """Fetch OHLC — read from hl_candle_fetcher cache first, fallback never hits CG API."""
+    """Fetch OHLC — read from HL candle cache first, fallback never hits CG API."""
     if USE_DEMO_PRICES:
         return _demo_ohlc(coin_id)
-    # Always prefer the local HL cache
+    # Prefer native HL per-coin cache
+    cached = _load_hl_candle_cache(coin_id)
+    if cached:
+        return cached
+    # Fallback legacy cg_ohlc_cache.json
     cached = _load_cg_ohlc_cache(coin_id)
     if cached:
         return cached

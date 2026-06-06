@@ -23,7 +23,7 @@ SIGNALS_PATH = STATE_DIR / "quick_scalp_signals.json"
 # Micro-range config — tighter than hl_breakout for scalp frequency
 LOOKBACK_CANDLES = 12       # ~1h of 5m candles
 SL_PCT = 0.02               # 2% SL
-TP_PCT = 0.05               # 5% TP (2.5:1 R:R)
+TP_PCT = 0.10               # 10% TP (5:1 R:R)
 VOL_MULT = 1.0              # Any volume
 
 # Top coins by volume preference
@@ -53,16 +53,32 @@ def generate_signals() -> List[Dict]:
         highs = [c["h"] for c in prior]
         lows = [c["l"] for c in prior]
 
-        # Volume proxy
-        vol_proxy = sum((c["h"] - c["l"]) * c["c"] for c in prior)
-        avg_vol = vol_proxy / len(prior) if prior else 1
-
         last_close = current["c"]
-        prior_high = max(highs) if highs else last_close
-        prior_low = min(lows) if lows else last_close
+        prior_high = max(highs)
+        prior_low = min(lows)
 
-        # LONG: current close breaks above prior high + volume
-        if last_close > prior_high and vol_proxy >= avg_vol * VOL_MULT:
+        # Volume filter: current candle volume must be >= 1.5x average of prior candles
+        prior_vols = [(c["h"] - c["l"]) * c["c"] for c in prior[:-1]] if len(prior) > 1 else []
+        avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 1
+        current_vol = (current["h"] - current["l"]) * current["c"]
+        vol_elevated = current_vol >= avg_prior_vol * 1.5 if avg_prior_vol > 0 else True
+        vol_proxy = current_vol
+
+        # Trend filter: at least 2 of last 3 prior candles close in signal direction
+        recent_closes = closes[-3:] if len(closes) >= 3 else closes
+        if len(recent_closes) >= 3:
+            up_count = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i-1])
+            down_count = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] < recent_closes[i-1])
+        else:
+            up_count = down_count = 0
+
+        # Body strength: current candle body >= 40% of range (no dojis)
+        body = abs(current["c"] - current["o"])
+        rng = current["h"] - current["l"] if current["h"] != current["l"] else 1
+        strong_body = (body / rng) >= 0.40 if rng > 0 else False
+
+        # LONG: current close breaks above prior high + elevated vol + up trend + strong body
+        if last_close > prior_high and vol_elevated and up_count >= 2 and strong_body:
             sl = last_close * (1 - SL_PCT)
             tp = last_close * (1 + TP_PCT)
             signals.append({
@@ -78,8 +94,8 @@ def generate_signals() -> List[Dict]:
                 "_rr": round(TP_PCT / SL_PCT, 1),
             })
 
-        # SHORT: current close breaks below prior low + volume
-        elif last_close < prior_low and vol_proxy >= avg_vol * VOL_MULT:
+        # SHORT: current close breaks below prior low + elevated vol + down trend + strong body
+        elif last_close < prior_low and vol_elevated and down_count >= 2 and strong_body:
             sl = last_close * (1 + SL_PCT)
             tp = last_close * (1 - TP_PCT)
             signals.append({

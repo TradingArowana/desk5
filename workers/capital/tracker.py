@@ -17,11 +17,11 @@ STATE_DIR = Path(__file__).parent.parent.parent / "data_store"
 TRACKER_PATH = STATE_DIR / "capital_tracker.json"
 LEDGER_PATH = STATE_DIR / "live_ledger.json"
 
-# Staged roadmap — TRUE total equity: $3,534
+# Staged roadmap
 MILESTONES = [4000, 5000, 10000, 20000, 50000, 100000, 150000, 200000]
 PHASE_1_TARGET = 3000.0
 ULTIMATE_TARGET = 200000.0
-START = 3534.41  # true total equity (baseline)
+START = 1000.0  # baseline
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")

@@ -1,33 +1,25 @@
 #!/bin/bash
-# Desk5 Public Edition — Dashboard Launcher
-#
-# SETUP: Copy .env.example → .env and fill in your values FIRST
-# REFERRAL: Join Hyperliquid at https://app.hyperliquid.xyz/join/TRADEDESK5
-#
-# IMPORTANT: Under $50,000, Hyperliquid uses a UNIFIED account.
-# Do NOT create subaccounts unless you know what you're doing.
-# If you want to debate this, open an issue — we will argue with you.
-#
+# Desk5 dashboard launcher
+# Requires environment variables set BEFORE running:
+#   export DESK_SOLANA_ADDRESS="your_sol_address_here"
+#   export DESK_FERNET_KEY="your-fernet-key-here"
 set -e
 
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-VENV="${PROJECT_ROOT}/.venv"
-
-if [ ! -f "${PROJECT_ROOT}/.env" ]; then
-    echo "ERROR: .env not found. Copy .env.example → .env and fill in your keys." >&2
-    exit 1
+if [ -z "$DESK_SOLANA_ADDRESS" ]; then
+    echo "NOTICE: DESK_SOLANA_ADDRESS not set. Solana deposit panel will show setup instructions." >&2
 fi
 
-if [ -z "${DESK_FERNET_KEY:-}" ]; then
+if [ -z "$DESK_FERNET_KEY" ]; then
     echo "WARNING: DESK_FERNET_KEY not set — using auto-generated key (restart will break encrypted HL creds)." >&2
 fi
 
-source "${VENV}/bin/activate"
+source ./.venv/bin/activate
+export ETHERSCAN_API_KEY="${ETHERSCAN_API_KEY:-}"
+# Load desk5 .env into gunicorn env
 set -a
-source "${PROJECT_ROOT}/.env"
+source ./.env
 set +a
+export PORT=${PORT:-8080}
+export PYTHONPATH=.
 
-export PORT="${PORT:-8080}"
-export PYTHONPATH="${PROJECT_ROOT}"
-
-exec "${VENV}/bin/gunicorn" -w 1 -b "0.0.0.0:${PORT}" --timeout 60 --log-level info app:app
+exec ./.venv/bin/gunicorn -w 1 -b 0.0.0.0:$PORT --timeout 60 --log-level info app:app
