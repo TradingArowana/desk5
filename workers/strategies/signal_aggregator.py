@@ -25,7 +25,7 @@ MAX_SLIPPAGE_PCT = 2.0             # Reject if spread implies >2% slippage
 # Known meme / shitcoin / manipulated tickers — BLOCKED regardless of filters
 SHITCOIN_BLACKLIST = {
     # Memecoins with no fundamentals
-    "PEPE", "SHIB", "FLOKI", "BONK", "WIF", "DOGE", 
+    "PEPE", "SHIB", "FLOKI", "BONK", "WIF",
     "MOG", "BOME", "PENGU", "POPCAT", "TRUMP", "MELANIA",
     "HARRY", "PORK", "TURBO", "BRETT", "TETRIS",
     # Extremely low-float / pump-and-dump prone
