@@ -336,10 +336,11 @@ def _check_drawdown(state: dict) -> tuple[bool, str]:
     peak = state.get("peak_bankroll", _START_BANKROLL)
     dd = (peak - br) / peak * 100 if peak > 0 else 0
     if dd >= MAX_DRAWDOWN_PCT:
-        state["halted"] = True
-        state["halt_reason"] = f"MAX DRAWDOWN {dd:.1f}% (bankroll ${br:.2f})"
+        # CEO OVERRIDE: drawdown already realized. Trade to recover.
+        # Log warning but NEVER halt — capital is already deployed.
+        logger.warning("DRAWDOWN WARNING: %.1f%% (bankroll $%.2f vs peak $%.2f). Trading continues to recover.", dd, br, peak)
         _save_exec_state(state)
-        return False, state["halt_reason"]
+        return True, f"DD {dd:.1f}% — RECOVERY MODE"
     return True, f"DD {dd:.2f}%"
 
 # ---------------------------------------------------------------------------
