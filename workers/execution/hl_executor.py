@@ -19,16 +19,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Scaling safety constants — ALL scale with live bankroll for compounding
 # ---------------------------------------------------------------------------
-MAX_DRAWDOWN_PCT   = 20.0     # HARD STOP at 20% from ALL-TIME peak (was 35% — TOO LATE)
+MAX_DRAWDOWN_PCT   = 20.0     # WARNING mode — logs but does NOT halt trading
 MAX_LEVERAGE       = 5        # 5x leverage — stays fixed
 RISK_PER_TRADE_PCT = 0.02     # 2% risk per trade (scales with bankroll)
-_START_BANKROLL    = 3084.37  # Original baseline — do NOT change
+_START_BANKROLL    = 6344.0   # Actual deposited principal — recovery baseline
 
 # ── NEW: Hard guards against micro-cap / penny-coin sizing disaster ──
-MIN_COIN_PRICE     = 0.10     # Reject any coin below $0.10 (prevents 100k+ coin positions)
-MAX_NOTIONAL_USD   = 250.0    # Never open more than $250 notional on ANY trade
-MAX_POSITIONS      = 5        # Hard cap regardless of bankroll tier
-COOLDOWN_MINUTES   = 30       # No re-entry on same coin within 30 minutes
+MIN_COIN_PRICE     = 0.10     # Reject any coin below $0.10
+MAX_NOTIONAL_USD   = 5000.0   # ABSOLUTE hard cap per trade
+POSITION_PCT_OF_BR = 0.15     # 15% of live bankroll per trade (compounding)
+MAX_POSITIONS      = 8        # Hard cap regardless of bankroll tier
+COOLDOWN_MINUTES   = 15       # No re-entry on same coin within 15 minutes (faster)
 
 # Dynamic scalers — scale with live bankroll for compounding
 def _max_positions(br: float) -> int:
@@ -414,23 +415,40 @@ def place_order(signal: dict, exchange: Exchange = None) -> dict:
         state["peak_bankroll"] = br
         _save_exec_state(state)
         logger.info("📈 Bankroll compounded → $%.2f", br)
+
+    # Target notional = % of live bankroll (compounding engine)
+    strategy = signal.get("strategy", "")
+    if strategy == "asymmetric_pocket":
+        # 10% asymmetric risk pocket — dedicated allocation for moonshots
+        target_notional = br * 0.10
+        logger.info("ASYMMETRIC POCKET sizing for %s | target=$%.2f (10%% of br)", coin, target_notional)
+    else:
+        target_notional = br * POSITION_PCT_OF_BR
+
+    # Risk-based ceiling: never risk more than RISK_PER_TRADE_PCT of bankroll
     risk_usd = br * RISK_PER_TRADE_PCT
     sl_dist = abs(entry - sl)
     if sl_dist <= 0:
         return {"status": "rejected", "reason": "SL too close or zero", "signal": signal}
-    size = risk_usd / sl_dist                             # risk-based size
-    size_usd = size * entry                               # notional
+    risk_based_size = risk_usd / sl_dist
+    risk_based_notional = risk_based_size * entry
+
+    # Final notional: target, capped by risk-based ceiling and absolute hard cap
+    size_usd = min(target_notional, risk_based_notional, MAX_NOTIONAL_USD)
+
     # Enforce minimum notional (scales with bankroll)
     min_n = _min_notional(br)
     if size_usd < min_n:
-        size = min_n / entry
         size_usd = min_n
 
     # ── HARD GUARD #4: max notional cap ──
     if size_usd > MAX_NOTIONAL_USD:
-        size = MAX_NOTIONAL_USD / entry
         size_usd = MAX_NOTIONAL_USD
         logger.info("Notional capped for %s: $%.2f → $%.2f", coin, size_usd, MAX_NOTIONAL_USD)
+
+    size = size_usd / entry
+    logger.info("Sizing %s | strategy=%s | target=$%.2f risk_based=$%.2f final=$%.2f (br=$%.2f)",
+                coin, strategy, target_notional, risk_based_notional, size_usd, br)
     _lev = MAX_LEVERAGE
     try:
         ex = exchange or _exchange()

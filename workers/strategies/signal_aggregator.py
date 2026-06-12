@@ -25,7 +25,7 @@ MAX_SLIPPAGE_PCT = 2.0             # Reject if spread implies >2% slippage
 # Known meme / shitcoin / manipulated tickers — BLOCKED regardless of filters
 SHITCOIN_BLACKLIST = {
     # Memecoins with no fundamentals
-    "PEPE", "SHIB", "FLOKI", "BONK", "WIF", "DOGE", 
+    "PEPE", "SHIB", "FLOKI", "BONK", "WIF",
     "MOG", "BOME", "PENGU", "POPCAT", "TRUMP", "MELANIA",
     "HARRY", "PORK", "TURBO", "BRETT", "TETRIS",
     # Extremely low-float / pump-and-dump prone
@@ -67,9 +67,11 @@ STRATEGY_FILES = [
     STATE_DIR / "gold_scalp_signals.json",
     STATE_DIR / "bell_scalp_signals.json",
     STATE_DIR / "momentum_fade_signals.json",
-    STATE_DIR / "fib_1m_scalp_signals.json",   # NEW: Fibonacci golden-zone 1m scalper
-    STATE_DIR / "orb_scalp_signals.json",        # NEW: Open Range Breakout 5m scalper
-    STATE_DIR / "trend_regime_signals.json",     # NEW: ADX+EMA+RSI trend regime scalper
+    STATE_DIR / "fib_1m_scalp_signals.json",      # Fibonacci golden-zone 1m scalper
+    STATE_DIR / "orb_scalp_signals.json",          # Open Range Breakout 5m scalper
+    STATE_DIR / "trend_regime_signals.json",       # ADX+EMA+RSI trend regime scalper
+    STATE_DIR / "asymmetric_pocket_signals.json",  # 10R breakout asymmetric pocket
+    STATE_DIR / "swing_momentum_signals.json",     # 4h swing momentum 5R–10R
 ]
 
 
