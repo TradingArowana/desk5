@@ -27,6 +27,10 @@ import requests
 from workers.strategies.signal_aggregator import save_to_queue
 from utils.logger import get_logger
 
+MIN_COIN_PRICE = 0.10       # Reject any coin below $0.10 (prevents micro-cap sizing disaster)
+MIN_VOL_USD_24H = 1000000   # Minimum $1M daily volume — no shit liquidity coins
+MAX_NOTIONAL_PER_TRADE = 250.0  # Hard cap per trade
+
 logger = get_logger("quick_scalp")
 
 STATE_DIR = Path(__file__).parent.parent.parent / "data_store"
@@ -243,10 +247,22 @@ def generate_signals(watchlist: List[Dict[str, Any]]) -> List[Signal]:
         # Volume spike — in demo always true
         if not USE_DEMO_PRICES and m["vol_proxy"] < m["avg_vol_proxy"] * 1.2:
             continue
+        # ── HARD GUARDS: price + liquidity ──
+        if last < MIN_COIN_PRICE:
+            logger.warning("QUICKSCALP REJECTED %s: price $%.6f below MIN_COIN_PRICE $%.2f", sym, last, MIN_COIN_PRICE)
+            continue
+        
+        # Volume guard — require $1M+ 24h volume proxy
+        if not USE_DEMO_PRICES and m["vol_proxy"] < MIN_VOL_USD_24H:
+            logger.warning("QUICKSCALP REJECTED %s: volume proxy $%.0f below MIN $%.0f", sym, m["vol_proxy"], MIN_VOL_USD_24H)
+            continue
+
         # Breakout above prior h1_high → LONG
         if last > prior_high * 1.001:
             sl = last * 0.97
             tp = last * 1.06
+            # Cap notional
+            size = MAX_NOTIONAL_PER_TRADE
             signals.append(
                 Signal(
                     coin=sym,

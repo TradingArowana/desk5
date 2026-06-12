@@ -19,25 +19,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Scaling safety constants — ALL scale with live bankroll for compounding
 # ---------------------------------------------------------------------------
-MAX_DRAWDOWN_PCT   = 35.0     # Catastrophic emergency brake only — 35% from ALL-TIME peak
+MAX_DRAWDOWN_PCT   = 20.0     # HARD STOP at 20% from ALL-TIME peak (was 35% — TOO LATE)
 MAX_LEVERAGE       = 5        # 5x leverage — stays fixed
 RISK_PER_TRADE_PCT = 0.02     # 2% risk per trade (scales with bankroll)
-_START_BANKROLL    = 1000.0  # Synced to live equity (auto-updates)
+_START_BANKROLL    = 3084.37  # Original baseline — do NOT change
+
+# ── NEW: Hard guards against micro-cap / penny-coin sizing disaster ──
+MIN_COIN_PRICE     = 0.10     # Reject any coin below $0.10 (prevents 100k+ coin positions)
+MAX_NOTIONAL_USD   = 250.0    # Never open more than $250 notional on ANY trade
+MAX_POSITIONS      = 5        # Hard cap regardless of bankroll tier
+COOLDOWN_MINUTES   = 30       # No re-entry on same coin within 30 minutes
 
 # Dynamic scalers — scale with live bankroll for compounding
 def _max_positions(br: float) -> int:
-    """Max concurrent positions scales with bankroll tier."""
+    """Max concurrent positions scales with bankroll tier — HARD CAPPED at MAX_POSITIONS."""
     if br >= 50000:
-        return 12
+        return min(12, MAX_POSITIONS)
     if br >= 20000:
-        return 10
+        return min(10, MAX_POSITIONS)
     if br >= 10000:
-        return 8
+        return min(8, MAX_POSITIONS)
     if br >= 5000:
-        return 7
+        return min(7, MAX_POSITIONS)
     if br >= 3000:
-        return 6
-    return 5
+        return min(6, MAX_POSITIONS)
+    return MAX_POSITIONS
 
 def _min_notional(br: float) -> float:
     """Min trade notional: 3% of bankroll, floor $75, soft cap at $300."""
@@ -380,6 +386,27 @@ def place_order(signal: dict, exchange: Exchange = None) -> dict:
     sl = float(signal.get("sl_px", 0))
     tp = float(signal.get("tp_px", 0))
 
+    # ── HARD GUARD #1: reject micro-cap / penny coins ──
+    if entry < MIN_COIN_PRICE:
+        return {"status": "rejected", "reason": f"{coin} entry ${entry:.6f} below MIN_COIN_PRICE ${MIN_COIN_PRICE}", "signal": signal}
+
+    # ── HARD GUARD #2: max positions cap ──
+    ledger = _load_ledger()
+    open_count = len([p for p in ledger if p.get("status") == "OPEN"])
+    if open_count >= MAX_POSITIONS:
+        return {"status": "rejected", "reason": f"MAX_POSITIONS {MAX_POSITIONS} reached ({open_count} open)", "signal": signal}
+
+    # ── HARD GUARD #3: cooldown — no re-entry on same coin within 30 min ──
+    now = datetime.now(timezone.utc)
+    for pos in ledger:
+        if pos.get("coin") == coin and pos.get("status") in ("OPEN", "CLOSED"):
+            try:
+                opened = datetime.fromisoformat(pos.get("open_at") or pos.get("opened_at", ""))
+                if (now - opened).total_seconds() < COOLDOWN_MINUTES * 60:
+                    return {"status": "rejected", "reason": f"{coin} on cooldown ({COOLDOWN_MINUTES}min)", "signal": signal}
+            except Exception:
+                pass
+
     # ── Sizing: live bankroll compounding, ignore signal size ──
     br = _estimate_bankroll(state)
     if br > state.get("peak_bankroll", _START_BANKROLL):
@@ -397,6 +424,12 @@ def place_order(signal: dict, exchange: Exchange = None) -> dict:
     if size_usd < min_n:
         size = min_n / entry
         size_usd = min_n
+
+    # ── HARD GUARD #4: max notional cap ──
+    if size_usd > MAX_NOTIONAL_USD:
+        size = MAX_NOTIONAL_USD / entry
+        size_usd = MAX_NOTIONAL_USD
+        logger.info("Notional capped for %s: $%.2f → $%.2f", coin, size_usd, MAX_NOTIONAL_USD)
     _lev = MAX_LEVERAGE
     try:
         ex = exchange or _exchange()

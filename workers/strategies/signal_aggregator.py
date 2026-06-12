@@ -17,6 +17,23 @@ UNIFIED_QUEUE = STATE_DIR / "all_signals.json"
 SIGNAL_TTL_SECONDS = 900  # 15 min
 MAX_QUEUE_SIZE = 10       # Top 10 only
 
+# ── HARD GUARDS — these are the LAST LINE OF DEFENSE before execution ──
+MIN_COIN_PRICE = 0.10              # Reject anything below $0.10
+MIN_VOLUME_24H_USD = 1_000_000     # Require $1M+ daily volume — no shit liquidity
+MAX_SLIPPAGE_PCT = 2.0             # Reject if spread implies >2% slippage
+
+# Known meme / shitcoin / manipulated tickers — BLOCKED regardless of filters
+SHITCOIN_BLACKLIST = {
+    # Memecoins with no fundamentals
+    "PEPE", "SHIB", "FLOKI", "BONK", "WIF", "DOGE", 
+    "MOG", "BOME", "PENGU", "POPCAT", "TRUMP", "MELANIA",
+    "HARRY", "PORK", "TURBO", "BRETT", "TETRIS",
+    # Extremely low-float / pump-and-dump prone
+    "XPL", "HEMI", "MEME", "BABY", "NXPC",
+    # Stablecoins (shouldn't be in perps but just in case)
+    "USDC", "USDT", "DAI", "TUSD",
+}
+
 # Tradeable coins cache (Hyperliquid perps)
 _HL_COINS: set = set()
 
@@ -50,6 +67,7 @@ STRATEGY_FILES = [
     STATE_DIR / "gold_scalp_signals.json",
     STATE_DIR / "bell_scalp_signals.json",
     STATE_DIR / "momentum_fade_signals.json",
+    STATE_DIR / "fib_1m_scalp_signals.json",   # NEW: Fibonacci golden-zone 1m scalper
 ]
 
 
@@ -125,6 +143,23 @@ def aggregate_signals() -> List[Dict]:
         if not is_tradeable(coin):
             dropped += 1
             continue
+        # ── HARD GUARD #1: SHITCOIN BLACKLIST ──
+        if coin.upper() in SHITCOIN_BLACKLIST:
+            dropped += 1
+            logger.warning("Signal %s BLACKLISTED — meme/manipulated coin, dropped", coin)
+            continue
+        # ── HARD GUARD #2: PRICE FLOOR ──
+        entry = float(s.get('entry_px', 0))
+        if entry < MIN_COIN_PRICE:
+            dropped += 1
+            logger.warning("Signal %s entry $%.6f below $%.2f — dropped", coin, entry, MIN_COIN_PRICE)
+            continue
+        # ── HARD GUARD #3: VOLUME FILTER ──
+        vol_24h = float(s.get('vol_24h', 0)) or float(s.get('volume_24h', 0))
+        if vol_24h > 0 and vol_24h < MIN_VOLUME_24H_USD:
+            dropped += 1
+            logger.warning("Signal %s volume $%.0f below $%.0f — dropped", coin, vol_24h, MIN_VOLUME_24H_USD)
+            continue
         s['_score'] = _score_signal(s)
         s['_rr'] = round(abs(float(s.get('tp_px', 0)) - float(s.get('entry_px', 0))) /
                           abs(float(s.get('entry_px', 0)) - float(s.get('sl_px', 0))), 2) if float(s.get('sl_px', 0)) > 0 else 0
@@ -142,6 +177,28 @@ def save_to_queue(signals):
     # Normalize single dict → list
     if isinstance(signals, dict):
         signals = [signals]
+
+    # HARD GUARD: reject any signal below $0.10 at queue level
+    filtered = []
+    for s in signals:
+        entry = float(s.get('entry_px', 0))
+        if entry < MIN_COIN_PRICE:
+            logger.warning("REJECTED %s entry $%.6f below $%.2f — not queued", s.get('coin', '?'), entry, MIN_COIN_PRICE)
+            continue
+        # ── HARD GUARD: SHITCOIN BLACKLIST at queue level ──
+        coin = s.get('coin', '')
+        if coin.upper() in SHITCOIN_BLACKLIST:
+            logger.warning("REJECTED %s — BLACKLISTED meme/manipulated coin", coin)
+            continue
+        # ── HARD GUARD: VOLUME at queue level ──
+        vol_24h = float(s.get('vol_24h', 0)) or float(s.get('volume_24h', 0))
+        if vol_24h > 0 and vol_24h < MIN_VOLUME_24H_USD:
+            logger.warning("REJECTED %s volume $%.0f below $%.0f — not queued", coin, vol_24h, MIN_VOLUME_24H_USD)
+            continue
+        filtered.append(s)
+    signals = filtered
+    if not signals:
+        return []
 
     existing = _load_json(UNIFIED_QUEUE)
 
