@@ -704,6 +704,14 @@ def sync_positions() -> dict:
         # Re-fetch SL after trail updates for final close check
         sl = pos["sl_px"]
 
+        # BUG FIX: Recompute hit_sl/hit_tp AFTER trail adjustment
+        if direction == "LONG":
+            hit_sl = mark <= sl
+            hit_tp = mark >= tp
+        else:
+            hit_sl = mark >= sl
+            hit_tp = mark <= tp
+
         if hit_sl or hit_tp:
             close_qty = _round_sz(coin, pos["size"])
             if close_qty <= 0:
